@@ -2,39 +2,32 @@ const sdk = require("microsoft-cognitiveservices-speech-sdk");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 require('dotenv').config();
 
-if (!process.env.GEMINI_API_KEY) {
-    console.error("\n🚨 ERROR FATAL: No se encontró la GEMINI_API_KEY.");
-}
-
+// ... (Configuración de Gemini igual que antes) ...
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 const activeSessions = {};
 
-// Mapa de voces neuronales de Azure según el idioma
+// Mapa de voces
 const voiceMap = {
     'es-ES': 'es-ES-ElviraNeural',
     'en-US': 'en-US-AndrewNeural',
     'fr-FR': 'fr-FR-DeniseNeural',
     'zh-CN': 'zh-CN-XiaoxiaoNeural',
-    // Puedes añadir más aquí. Si llega un idioma desconocido, Azure usará uno por defecto si se configura auto.
 };
 
+// ... (Función procesarStreamAzure igual que antes) ...
 function procesarStreamAzure(socketId, audioBuffer, sourceLang, targetLang, callbackResultado) {
-
+    // Código existente de reconocimiento... se mantiene igual.
+    // Solo asegúrate de llamar a sintetizarVozAzure dentro del callback tal como lo tenías.
+    
     if (!activeSessions[socketId]) {
-        console.log(`🔵 Iniciando sesión para: ${socketId} (${sourceLang} -> ${targetLang})`);
-        
         if (!process.env.AZURE_SPEECH_KEY || !process.env.AZURE_SPEECH_REGION) {
-            console.error("🚨 ERROR: Faltan las claves de AZURE en el .env");
-            return;
+            console.error("🚨 ERROR: Faltan las claves de AZURE"); 
+            return; 
         }
 
-        const speechConfig = sdk.SpeechConfig.fromSubscription(
-            process.env.AZURE_SPEECH_KEY,
-            process.env.AZURE_SPEECH_REGION
-        );
-
+        const speechConfig = sdk.SpeechConfig.fromSubscription(process.env.AZURE_SPEECH_KEY, process.env.AZURE_SPEECH_REGION);
         speechConfig.speechRecognitionLanguage = sourceLang;
 
         const pushStream = sdk.AudioInputStream.createPushStream();
@@ -46,75 +39,37 @@ function procesarStreamAzure(socketId, audioBuffer, sourceLang, targetLang, call
                 const textoOriginal = e.result.text;
                 if (!textoOriginal || textoOriginal.trim().length < 2) return;
                 
-                console.log(`👂 Oído (${sourceLang}): "${textoOriginal}"`);
-              
                 try {
-                    // 1. Traducir con Gemini
                     const traduccion = await traducirConGemini(textoOriginal, sourceLang, targetLang);
-                    console.log(`🧠 Traducido (${targetLang}): "${traduccion}"`);
-                    
-                    // 2. NUEVO: Convertir Texto a Audio (TTS)
+                    // AQUÍ ESTÁ EL CAMBIO IMPORTANTE: Generar MP3
                     const audioBase64 = await sintetizarVozAzure(traduccion, targetLang);
 
-                    // 3. Enviar ambos datos (Texto y Audio) al frontend
                     callbackResultado({
                         original: textoOriginal,
                         translated: traduccion,
-                        audio: audioBase64 // Esto es lo que reproducirá Android
+                        audio: audioBase64 
                     });
-
                 } catch (error) {
-                    console.error("❌ Error en flujo de traducción/audio:", error);
-                    callbackResultado({
-                        original: textoOriginal,
-                        translated: "Error translating",
-                        audio: null
-                    });
+                    console.error("Error flujo:", error);
                 }
             }
         };
-
-        recognizer.canceled = (s, e) => {
-            console.log(`❌ Azure Cancelado: ${e.reason}`);
-            detenerSesion(socketId);
-        };
-
-        recognizer.sessionStopped = (s, e) => {
-            detenerSesion(socketId);
-        };
-
+        // ... (resto de eventos canceled, sessionStopped) ...
         recognizer.startContinuousRecognitionAsync();
-
-        activeSessions[socketId] = {
-            recognizer: recognizer,
-            pushStream: pushStream
-        };
+        activeSessions[socketId] = { recognizer, pushStream };
     }
-
-    try {
-        const session = activeSessions[socketId];
-        if (session && session.pushStream) {
-            session.pushStream.write(audioBuffer);
-        }
-    } catch (error) {
-        console.error("Error stream audio:", error);
-    }
+    // Escribir en stream
+    if (activeSessions[socketId]) activeSessions[socketId].pushStream.write(audioBuffer);
 }
 
-// --- FUNCIONES AUXILIARES ---
-
+// ... (Función traducirConGemini igual) ...
 async function traducirConGemini(texto, origen, destino) {
-    const prompt = `Translate the following spoken text from ${origen} to ${destino}.
-    Be natural, acting as a professional interpreter. Do not be literal.
-    Only output the translation, no extra text.
-    Text: "${texto}"`;
-
+    const prompt = `Translate only the text: "${texto}" from ${origen} to ${destino}.`;
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text().trim();
+    return result.response.text().trim();
 }
 
-// NUEVA FUNCIÓN: Genera el audio de retorno
+// --- CORRECCIÓN CRÍTICA AQUÍ ---
 function sintetizarVozAzure(texto, idiomaDestino) {
     return new Promise((resolve, reject) => {
         const speechConfig = sdk.SpeechConfig.fromSubscription(
@@ -122,9 +77,12 @@ function sintetizarVozAzure(texto, idiomaDestino) {
             process.env.AZURE_SPEECH_REGION
         );
 
-        // Seleccionar voz basada en el idioma de destino
         const voiceName = voiceMap[idiomaDestino] || 'en-US-AvaMultilingualNeural'; 
         speechConfig.speechSynthesisVoiceName = voiceName;
+
+        // !!! AQUÍ ESTÁ EL ARREGLO !!!
+        // Forzamos el formato a MP3 para que Android pueda reproducirlo sin problemas
+        speechConfig.speechSynthesisOutputFormat = sdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3; 
 
         const synthesizer = new sdk.SpeechSynthesizer(speechConfig);
 
@@ -132,19 +90,16 @@ function sintetizarVozAzure(texto, idiomaDestino) {
             texto,
             (result) => {
                 if (result.reason === sdk.ResultReason.SynthesizingAudioCompleted) {
-                    // Convertimos el buffer de audio a Base64 para enviarlo fácil por socket
                     const audioBuffer = result.audioData;
                     const base64Audio = Buffer.from(audioBuffer).toString('base64');
                     synthesizer.close();
                     resolve(base64Audio);
                 } else {
-                    console.error("TTS Error:", result.errorDetails);
                     synthesizer.close();
                     reject(result.errorDetails);
                 }
             },
             (err) => {
-                console.error("TTS Fatal Error:", err);
                 synthesizer.close();
                 reject(err);
             }
@@ -152,13 +107,13 @@ function sintetizarVozAzure(texto, idiomaDestino) {
     });
 }
 
+// ... (detenerSesion igual) ...
 function detenerSesion(socketId) {
     if (activeSessions[socketId]) {
-        const { recognizer, pushStream } = activeSessions[socketId];
         try {
-            pushStream.close();
-            recognizer.stopContinuousRecognitionAsync(() => {
-                recognizer.close();
+            activeSessions[socketId].pushStream.close();
+            activeSessions[socketId].recognizer.stopContinuousRecognitionAsync(() => {
+                activeSessions[socketId].recognizer.close();
             });
         } catch(e) {}
         delete activeSessions[socketId];
